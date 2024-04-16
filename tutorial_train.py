@@ -163,6 +163,8 @@ class IPAdapter(torch.nn.Module):
         ip_tokens = self.image_proj_model(image_embeds)
         encoder_hidden_states = torch.cat([encoder_hidden_states, ip_tokens], dim=1)
         # Predict the noise residual
+        # import pdb
+        # pdb.set_trace()
         noise_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states).sample
         return noise_pred
 
@@ -269,7 +271,7 @@ def parse_args():
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
-        default=0,
+        default=16,
         help=(
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
@@ -321,6 +323,7 @@ def main():
     data_root = '/home/work/tubb/CelebAMask-HQ/CelebA-HQ-img'
     lmk_root = '/home/work/tubb/CelebAMask-HQ/CelebA-HQ-lmk'
     text_root = '/home/work/tubb/CelebAMask-HQ/celeba-caption'
+    save_image_dir = './debug_images'
     ### 
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -448,34 +451,49 @@ def main():
             
                 with torch.no_grad():
                     encoder_hidden_states = text_encoder(batch["text_input_ids"].to(accelerator.device))[0]
-                
+
                 noise_pred = ip_adapter(noisy_latents, timesteps, encoder_hidden_states, image_embeds)
                 ### 这个位置通过noise pred 计算x0
                 latent_pred = pred_x0_from_noise(noise_scheduler, noisy_latents, noise_pred, timesteps)
-                latent_decode_image = vae.decode((1/vae.config.scaling_factor) *latents.to(accelerator.device, dtype=weight_dtype)).sample
-                # import pdb
-                # pdb.set_trace()
+                latent_decode_image = vae.decode((1/vae.config.scaling_factor) *latent_pred.to(accelerator.device, dtype=weight_dtype)).sample
+                    
+
                 # latent_decode_image = (latent_decode_image+1)/2
                 # latent_decode_image = latent_decode_image * 255
                 # latent_decode_image = latent_decode_image[0].cpu().numpy().transpose(1, 2, 0)
                 # cv2.imwrite('test.jpg', latent_decode_image[:, :, ::-1])
                 # cv2.imwrite('test1.jpg', batch['images'][0].cpu().numpy().transpose(1, 2, 0)[:,:,::-1]*255.)
+                # import pdb
+                # pdb.set_trace()
                 id_loss = id_wraper.get_id_loss(batch['images'], batch['M'], latent_decode_image, batch['M'])
                 ### end of add 
         
-                loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
-            
+                l1loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                loss = l1loss + id_loss * 0.01
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean().item()
+                ### 输出loss
+                avg_l1loss = accelerator.gather(l1loss.repeat(args.train_batch_size)).mean().item()
+                avg_idloss = accelerator.gather(id_loss.repeat(args.train_batch_size)).mean().item()
                 
                 # Backpropagate
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()
 
+                if global_step % 1:
+                    debug_image = (latent_decode_image.copy()+1)/2
+                    debug_image = debug_image * 255
+                    nums_images = debug_image.shape[0]
+                    save_debug_dir = os.path.join(save_image_dir, str(global_step))
+                    os.makedirs(save_debug_dir, exist_ok=True)
+                    for i in range(nums_images):
+                        img_content = debug_image[i].cpu().numpy()
+                        cv2.imwrite(os.path.join(save_debug_dir, '{}.jpg'.format(i)), img_content[:,:,::-1])
+
                 if accelerator.is_main_process:
-                    print("Epoch {}, step {}, data_time: {}, time: {}, step_loss: {}".format(
-                        epoch, step, load_data_time, time.perf_counter() - begin, avg_loss))
+                    print("Epoch {}, step {}, data_time: {}, time: {}, step_loss: {}, l1loss: {}, idloss : {}".format(
+                        epoch, step, load_data_time, time.perf_counter() - begin, avg_loss, avg_l1loss, avg_idloss))
             
             global_step += 1
             
