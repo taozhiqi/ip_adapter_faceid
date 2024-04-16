@@ -481,14 +481,14 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
 
-                if global_step % 1:
-                    debug_image = (latent_decode_image.copy()+1)/2
+                if global_step % 500 == 0:
+                    debug_image = (latent_decode_image.clone()+1)/2
                     debug_image = debug_image * 255
                     nums_images = debug_image.shape[0]
                     save_debug_dir = os.path.join(save_image_dir, str(global_step))
                     os.makedirs(save_debug_dir, exist_ok=True)
                     for i in range(nums_images):
-                        img_content = debug_image[i].cpu().numpy()
+                        img_content = debug_image[i].detach().cpu().numpy().transpose(1, 2, 0)
                         cv2.imwrite(os.path.join(save_debug_dir, '{}.jpg'.format(i)), img_content[:,:,::-1])
 
                 if accelerator.is_main_process:
